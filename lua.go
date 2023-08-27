@@ -1,13 +1,12 @@
-package lua
+package main
 
 import (
 	"github.com/yuin/gopher-lua"
-
 )
 
 type Module struct {
 	Name string
-	Funcs map["string"]glua.LGFunction
+	Funcs map["string"]lua.LGFunction
 }
 
 func CompileLuaFromPath(filePath string) (*lua.FunctionProto, error) {
