@@ -1,0 +1,3 @@
+package functions
+
+func Load()

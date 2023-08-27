@@ -1,0 +1,5 @@
+instead of having lua-> golang http. i tihnk it maeks more sense to have the functions simply represent the logic it WANTS to do, and just extract the data, instead of actually executing it.
+so for example in lua:
+http.get("google.com")
+instead of the get function actually running a get request, it should instead send the data to the queue and mark it as a get request. this means it can queue up jobs and execute it quickyl
+im not really sure if this would be faster or not but it makes sense to me
