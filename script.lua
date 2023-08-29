@@ -1,2 +1,2 @@
-body = sendHTTReq("https://jsonplaceholder.typicode.com/todos/1");
-print(body)
+print("running from lua")
+print(data)
