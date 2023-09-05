@@ -8,6 +8,10 @@ import (
 	"github.com/yuin/gopher-lua"
 )
 
+type Statistics struct {
+	Success int
+}
+
 type WorkerPoolOptions struct {
 	scriptPath string
 	dataPath   string
@@ -17,14 +21,19 @@ type WorkerPoolOptions struct {
 }
 
 type WorkerPool struct {
-	data       []string
+	data []string
+	//yea too many channels but too lazy to write logic
 	workerChan chan any
+	pause      chan any
+	stop       chan any
 
 	//compiled lua script
 	script *lua.FunctionProto
 
 	opts WorkerPoolOptions
 	wg   sync.WaitGroup
+
+	stats Statistics
 }
 
 func NewWorkerPool(opts WorkerPoolOptions) *WorkerPool {
@@ -33,6 +42,8 @@ func NewWorkerPool(opts WorkerPoolOptions) *WorkerPool {
 		opts:       opts,
 		wg:         sync.WaitGroup{},
 		workerChan: make(chan any),
+		pause:      make(chan any),
+		stop:       make(chan any),
 	}
 }
 
@@ -61,19 +72,36 @@ func (p WorkerPool) Start() error {
 	return nil
 }
 
+func (p WorkerPool) Pause() {
+	p.pause <- any{}
+}
+
+func (p WorkerPool) Stop() {
+	p.stop <- any{}
+}
+
 // i think spawning the max number of threads first, then simply killing either just stop using them or killing them as it needs to scale down?
 func (p *WorkerPool) producer() {
 	batch := []any{}
 	for {
-		batch = append(batch, "this is data")
-		if len(batch) == p.opts.maxThreads {
-			//this is a little weird... but i think it works?
-			p.wg.Add(p.opts.maxThreads)
-			p.executeBatch(batch)
-			p.wg.Wait()
-			batch = nil
+		select {
+		case <-p.pause:
+			<-p.pause
+		case <-p.stop:
+			break
+		default:
+			batch = append(batch, "this is data")
+			if len(batch) == p.opts.maxThreads {
+				//this is a little weird... but i think it works?
+				//add a seperate mode for iterating over data, and batches
+				p.wg.Add(p.opts.maxThreads)
+				p.executeBatch(batch)
+				p.wg.Wait()
+				batch = nil
+			}
 		}
 	}
+	//exec excess  data
 }
 
 func (p *WorkerPool) executeBatch(batch []any) {
