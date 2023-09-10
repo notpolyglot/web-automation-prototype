@@ -1,11 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"github.com/yuin/gopher-lua"
 	"log"
 	"sync"
-
-	"github.com/yuin/gopher-lua"
 )
 
 type Statistics struct {
@@ -129,6 +129,10 @@ func (p *WorkerPool) worker() chan any {
 
 		//gopher-lua LState not thread safe. initiate it at start then use it across worker life
 		for elem := range p.workerChan { //rename to event, and send kill events?
+			ctx := context.Background()
+			ctx = context.WithValue(ctx, "datum", elem.(string))
+			L.SetContext(ctx)
+
 			L.SetGlobal("data", lua.LString(elem.(string))) // deciding type is just string? <update make this LValue
 			err := DoCompiledFile(L, p.script)
 			if err != nil {
