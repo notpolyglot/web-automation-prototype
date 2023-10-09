@@ -1,173 +1,257 @@
 package main
 
 import (
-	"context"
-	"fmt"
-	"github.com/yuin/gopher-lua"
-	"log"
 	"sync"
+	"time"
+
+	"github.com/panjf2000/ants/v2"
 )
 
-type Statistics struct {
-	Success int
-}
-
-type WorkerPoolOptions struct {
-	scriptPath string
-	dataPath   string
-	proxyPath  string
-
-	maxThreads int
-}
+// import "sync"
 
 type WorkerPool struct {
-	data []string
-	//yea too many channels but too lazy to write logic
-	workerChan chan any
-	pause      chan any
-	stop       chan any
+	pool *ants.PoolWithFunc
 
-	//compiled lua script
-	script *lua.FunctionProto
+	//Passes data element
+	ExecFN func(i interface{}) ExecResponse
 
-	opts WorkerPoolOptions
-	wg   sync.WaitGroup
+	//thread safe moment to access counters
+	//only called if response is received & current time is past last print + minrefreshrate
+	PrintFN func()
 
-	stats Statistics
+	database Database
+
+	Logger Logger
+
+	//pause and stop
+	pChan chan struct{}
+	sChan chan struct{}
+
+	DChan chan any
+	rChan chan ExecResponse
+
+	counters map[string]int
+
+	rpm *RollingRPM
+
+	// Logger ants.Logger
+	lastPrint      time.Time
+	minRefreshRate time.Duration
+
+	disableProducer bool
+
+	wg sync.WaitGroup
 }
 
-func NewWorkerPool(opts WorkerPoolOptions) *WorkerPool {
+type ExecResponse struct {
+	datum any
 
-	return &WorkerPool{
-		opts:       opts,
-		wg:         sync.WaitGroup{},
-		workerChan: make(chan any),
-		pause:      make(chan any),
-		stop:       make(chan any),
+	Capture []any
+	//list of Counters to increment by 1
+	Counters []string
+
+	Success bool
+
+	//logs error, increments error, then skips rest
+	Error error
+
+	//increments retry by 1, readds element to queue, then skips rest
+	Retry bool
+}
+
+var defaultCounters = map[string]int{
+	"success": 0,
+	"error":   0,
+	"retry":   0,
+	"ban":     0,
+	"fail":    0,
+}
+
+// allocates pool but doesnt start executing
+func NewWorkerPool(exec func(i any) ExecResponse, size int, opts ...OptFunc) *WorkerPool {
+	p := &WorkerPool{
+		ExecFN:         exec,
+		rpm:            NewMovingRPM(10),
+		pChan:          make(chan struct{}),
+		sChan:          make(chan struct{}),
+		DChan:          make(chan any),
+		rChan:          make(chan ExecResponse),
+		counters:       defaultCounters,
+		Logger:         DefaultLogger{},
+		minRefreshRate: time.Second,
+	}
+
+	p.rpm.Add(0)
+	p.pool, _ = ants.NewPoolWithFunc(size, p.consumer, ants.WithLogger(p.Logger))
+	for _, fn := range opts {
+		fn(p)
+	}
+	return p
+}
+
+type OptFunc func(*WorkerPool)
+
+func WithPrintFunc(fn func()) OptFunc {
+	return func(p *WorkerPool) {
+		p.PrintFN = fn
 	}
 }
 
-func (p WorkerPool) Start() error {
-	log.Println("Starting job")
-	//compile script
-	var err error
-	p.script, err = CompileLuaFromPath(p.opts.scriptPath)
-	if err != nil {
-		return err
+func WithSize(s int) OptFunc {
+	return func(p *WorkerPool) {
+		p.pool.Tune(s)
+	}
+}
+
+func WithLogger(l Logger) OptFunc {
+	return func(p *WorkerPool) {
+		p.Logger = l
+	}
+}
+
+func WithDatabase(db Database) OptFunc {
+	return func(p *WorkerPool) {
+		p.database = db
+	}
+}
+
+// minimum rate at which PrintFN is called
+func WithMinRefreshRate(d time.Duration) OptFunc {
+	return func(p *WorkerPool) {
+		p.minRefreshRate = d
+	}
+}
+
+func WithDisableDefaultProducer(p *WorkerPool) {
+	p.disableProducer = true
+}
+
+func WithCounters(counters []string) OptFunc {
+	return func(p *WorkerPool) {
+		for _, counter := range counters {
+			p.counters[counter] = 0
+		}
+	}
+}
+
+func (p *WorkerPool) RPM() float64 {
+	return p.rpm.Avg()
+}
+
+func (p *WorkerPool) Start() {
+	p.sampleRPM()
+	p.PrintFN()
+	p.lastPrint = time.Now()
+
+	go p.handleBatchReslts()
+
+	if !p.disableProducer {
+		go p.producer()
 	}
 
-	//load proxies
-	//load data
-
-	//start workers
-	resultChans := []chan any{}
-	for i := 1; i < p.opts.maxThreads; i++ {
-		resultChans = append(resultChans, p.worker())
-	}
-
-	//MULTIPLEX RESULTCHANS
-	go p.handleBatchResults(multiplex(resultChans))
-	p.producer()
-
-	return nil
 }
 
-func (p WorkerPool) Pause() {
-	p.pause <- any{}
+func (p *WorkerPool) Wait() {
+	p.wg.Wait()
 }
 
-func (p WorkerPool) Stop() {
-	p.stop <- any{}
+func (p *WorkerPool) Pause() {
+	p.pChan <- struct{}{}
 }
 
-// i think spawning the max number of threads first, then simply killing either just stop using them or killing them as it needs to scale down?
+func (p *WorkerPool) Stop() {
+	p.sChan <- struct{}{}
+	p.wg.Wait()
+	close(p.rChan)
+	//this is kindaaaa weird but i dont know
+	p.wg.Add(1)
+	p.wg.Wait()
+}
+
 func (p *WorkerPool) producer() {
-	batch := []any{}
 	for {
 		select {
-		case <-p.pause:
-			<-p.pause
-		case <-p.stop:
+		case d := <-p.DChan:
+			p.wg.Add(1) //i forgot
+			err := p.pool.Invoke(d)
+			if err != nil {
+				//either a problem with the pool in which case all will fail
+				//or problem with the data in which case retrying will do nothing
+
+			}
+		case <-p.pChan:
+			<-p.pChan
+		case <-p.sChan:
 			break
-		default:
-			batch = append(batch, "this is data")
-			if len(batch) == p.opts.maxThreads {
-				//this is a little weird... but i think it works?
-				//add a seperate mode for iterating over data, and batches
-				p.wg.Add(p.opts.maxThreads)
-				p.executeBatch(batch)
-				p.wg.Wait()
+
+		}
+	}
+}
+
+func (p *WorkerPool) consumer(i interface{}) {
+	r := p.ExecFN(i)
+
+	//need to pass the elem so it can be exported with captured data
+	r.datum = i
+	p.rChan <- r
+	p.wg.Done()
+}
+
+func (p *WorkerPool) handleBatchReslts() {
+	batch := [][]any{}
+
+	defer func() {
+		//handle excess data
+		if p.database != nil {
+			if len(batch) >= 1 {
+				p.database.InsertBatch(batch)
+			}
+		}
+
+		//do a quickie refresh charvaa
+
+		p.sampleRPM()
+		p.PrintFN()
+		p.wg.Done()
+	}()
+
+	for r := range p.rChan {
+		//only need to even attempt print if something changed
+		if time.Since(p.lastPrint) >= p.minRefreshRate {
+			p.sampleRPM()
+			p.PrintFN()
+			p.lastPrint = time.Now()
+		}
+
+		if r.Error != nil {
+			p.Logger.Error(r.Error)
+			p.counters["error"] += 1
+			continue
+		}
+		if r.Retry {
+			p.counters["retry"] += 1
+			p.DChan <- r.datum
+			continue
+		}
+		if !r.Success {
+			p.counters["fail"] += 1
+			continue
+		}
+		p.counters["success"] += 1
+
+		for _, elem := range r.Counters {
+			_, isDefaultCounter := defaultCounters[elem]
+			if !isDefaultCounter {
+				p.counters[elem] += 1
+			}
+		}
+
+		if p.database != nil {
+			batch = append(batch, append([]any{r.datum}, r.Capture...))
+			if len(batch) == 5 {
+				p.database.InsertBatch(batch)
 				batch = nil
 			}
 		}
-	}
-	//exec excess  data
-}
-
-func (p *WorkerPool) executeBatch(batch []any) {
-	//send data to pool
-	//needs a wait group
-	for _, element := range batch {
-		p.workerChan <- element
-	}
-
-	//re-adjust size of threads if needed here?
-}
-
-func (p *WorkerPool) worker() chan any {
-	out := make(chan any)
-	go func() {
-		//instead of making a state every time, just make it once then copy it for each worker (not a pointer. not thread safe§)
-		//there is a pattern in the docs for a lua pool, look into that.
-		L := lua.NewState()
-		defer L.Close()
-
-		//i think  can use 1 lua state but have to make a seperate library then import helpers to use channels to send the data
-
-		//dont think this library supports proxies, so will most likely have to fork it or make one custom
-		//L.PreloadModule("http", NewHttpModule(&http.Client{}).Loader)
-
-		//gopher-lua LState not thread safe. initiate it at start then use it across worker life
-		for elem := range p.workerChan { //rename to event, and send kill events?
-			ctx := context.Background()
-			ctx = context.WithValue(ctx, "datum", elem.(string))
-			L.SetContext(ctx)
-
-			L.SetGlobal("data", lua.LString(elem.(string))) // deciding type is just string? <update make this LValue
-			err := DoCompiledFile(L, p.script)
-			if err != nil {
-
-			}
-
-			//get returned response from script (status of script eg: rate limit) <DOESNT ACCOUNT FOR IF SCRIPT RETURNS NOTHING
-			retValue := L.Get(-1) // Get the top value on the stack
-			L.Pop(1)              // Pop the value from the stack
-			_ = retValue
-			out <- "retvalue"
-			p.wg.Done()
-			//run the lua script and pass the data
-		}
-	}()
-	return out
-}
-
-// multiplex worker channel responses into 1 then handle here
-func (p *WorkerPool) handleBatchResults(results chan any) {
-	//handle in batches to reduce stress on database
-
-	batch := []any{}
-
-	for result := range results {
-		//increment counters
-		batch = append(batch, result)
-
-		if len(batch) == 5 {
-			fmt.Println("handling batch :D")
-			batch = nil
-		}
-
-	}
-	//handle excess data
-	if len(batch) >= 1 {
 	}
 }

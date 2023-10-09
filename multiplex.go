@@ -4,12 +4,12 @@ import (
 	"sync"
 )
 
-func multiplex(inputs []chan any) chan any {
+func multiplex[t any](inputs []chan t) chan t {
 	var wg sync.WaitGroup
-	out := make(chan any)
+	out := make(chan t)
 	for i := range inputs {
 		wg.Add(1)
-		go func(input <-chan any) {
+		go func(input <-chan t) {
 			for val := range input {
 				out <- val
 			}
