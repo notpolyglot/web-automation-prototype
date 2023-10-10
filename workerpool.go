@@ -140,6 +140,7 @@ func (p *WorkerPool) RPM() float64 {
 
 func (p *WorkerPool) Start() {
 	p.sampleRPM()
+
 	p.PrintFN()
 	p.lastPrint = time.Now()
 
