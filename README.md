@@ -114,8 +114,15 @@ func main() {
 }
 ```
 
-## Features planned to be implemented
+## Example Use cases
+ - Fuzzing
+ - Credential stuffing
+ - Web scraping
 
+## Features planned to be implemented (unordered)
+
+ - Custom Lua libraries (currently using a package)
+ - Libraries for web scraping
  - Debugger with tools such as a HTML renderer 
  - GUI made in Wails
  - PostgreSQL and SQLite3 database interfaces
