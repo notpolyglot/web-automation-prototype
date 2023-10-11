@@ -239,6 +239,10 @@ func (p *WorkerPool) handleBatchReslts() {
 		p.counters["success"] += 1
 
 		for _, elem := range r.Counters {
+			if _, exists := p.counters[elem]; !exists {
+				continue
+			}
+
 			_, isDefaultCounter := defaultCounters[elem]
 			if !isDefaultCounter {
 				p.counters[elem] += 1

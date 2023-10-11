@@ -7,7 +7,6 @@ import (
 	"errors"
 	// "errors"
 	"fmt"
-	"ob3-prototype/lualib"
 	"os"
 	"strings"
 	"sync"
@@ -74,7 +73,6 @@ func (pl *lStatePool) New() *stateAndFunc {
 	L := lua.NewState()
 
 	libs.Preload(L)
-	lualib.RegisterResponseType(L)
 
 	DoCompiledFile(L, pl.bytecode)
 
@@ -145,7 +143,7 @@ func (s *LuaScript) execute(datum any) (r ExecResponse) {
 }
 
 func (s *LuaScript) print() {
-	// fmt.Print("\033[H\033[2J")
+	fmt.Print("\033[H\033[2J")
 
 	for k, v := range s.pool.counters {
 		fmt.Printf("%s: %d\n", strings.Title(k), v)
@@ -158,7 +156,7 @@ func (s *LuaScript) print() {
 func NewLuaScript(path string, size int, opts ...OptFunc) *LuaScript {
 	s := &LuaScript{}
 	s.scriptPath = path
-	s.pool = NewWorkerPool(s.execute, size, WithPrintFunc(s.print))
+	s.pool = NewWorkerPool(s.execute, size, append(opts, WithPrintFunc(s.print))...)
 
 	s.lPool = &lStatePool{
 		saved: make([]*stateAndFunc, 0, size),
