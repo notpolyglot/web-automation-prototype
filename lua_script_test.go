@@ -13,6 +13,10 @@ func TestLuaScript(t *testing.T) {
 
 	// for i := 0; i < 5; i++ {
 	s.pool.DChan <- "test"
+
+	s.pool.DChan <- "tfghdfghdhfg"
+	s.pool.DChan <- "OOOOOOO"
+	s.pool.DChan <- "1234567456"
 	// 	s.pool.DChan <- ExecData{
 	// 		email: "pinkearwax@email.com",
 	// 		pass:  "real!!!123",

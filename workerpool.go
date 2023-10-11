@@ -81,7 +81,6 @@ func NewWorkerPool(exec func(i any) ExecResponse, size int, opts ...OptFunc) *Wo
 		minRefreshRate: time.Second,
 	}
 
-	p.rpm.Add(0)
 	p.pool, _ = ants.NewPoolWithFunc(size, p.consumer, ants.WithLogger(p.Logger))
 	for _, fn := range opts {
 		fn(p)
@@ -140,7 +139,6 @@ func (p *WorkerPool) RPM() float64 {
 
 func (p *WorkerPool) Start() {
 	p.sampleRPM()
-
 	p.PrintFN()
 	p.lastPrint = time.Now()
 
